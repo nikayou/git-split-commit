@@ -1,0 +1,122 @@
+#!/bin/bash
+
+# USE WITH CAUTION: this script re-writes history. You should be
+# fully aware of the consequences: if you perform this job on
+# a `pushed` commit, you will have to do a `push-force` to update.
+# This means your collaborators will have to `pull-force`,
+# potentially losing changes and breaking history.
+
+((!$#)) && echo No commit hash provided, ignored && exit 1
+
+COMMIT_TITLE=""
+COMMIT_MSG=""
+CHANGE_LIST=""
+
+# Input: commit SHA
+function commitMsg() {
+    # first line is the commit id, we don't need it
+    BASE=$(git rev-list --format=%B --max-count=1 $1  |  tail -n +2)
+    # second line is the commit title
+    COMMIT_TITLE=$(echo "$BASE" | head -n 1)
+    # the rest is the commit message body (excluding the separator line break)
+    COMMIT_MSG=$(echo "$BASE" | tail -n +3)    
+}
+
+
+# Input: commit SHA
+function changeList() {    
+    # Output is like:
+    # M a.txt
+    # A b.txt
+    # D c.txt
+    # R100 d.ttx d.txt
+    #
+    # Where M stands for "Modified" (git add),
+    # A stands for "Addition" (git add),
+    # D stands for "Deletion" (git rm),
+    # R100 stands for "Rename" (git mv), only with 100% matching    
+
+    # we don't need the commit id at the first line.
+    CHANGE_LIST=$(git diff-tree --name-status --find-renames=1 --find-copies=1 -r --no-commit-id $1)
+}
+
+# Input: commit SHA
+function editCommit() {
+    EDITOR="sed -i 's/pick $1/e $1/g'"
+    GIT_SEQUENCE_EDITOR="sed -i -e 's/^pick $1/edit $1/'" git rebase -i $1^ || exit 1
+    # re-playing events separately
+    echo "sed: '$GIT_SEQUENCE_EDITOR'"
+}
+
+# Input: nope
+function unstage() {
+    echo "Unstaging..."
+    git reset --soft HEAD^
+    git reset HEAD
+}
+
+# Input: commit SHA
+function replayEvents() {
+    while read -r -a line; do
+	CMD="${line[0]}"
+	ARG="${line[1]}"
+	ARG2="${line[2]}"
+	echo "Current line: '$line' -> '$CMD' '$ARG' '$ARG2'"
+	case $CMD in
+	    # Modify
+	    "M")
+		git add $ARG
+		;;
+	    
+	    # Delete
+	    "D")
+		git rm $ARG
+		;;
+	    
+	    # Add
+	    "A")
+		git add $ARG
+		;;
+	    
+	    # Rename
+	    "R"|"R1"|"R100")
+		# TODO: using git mv does not work great as ARG1 is already in "deleted" state, so it says "bad source"
+		# git mv $ARG $ARG2
+		git add $ARG2
+		git rm $ARG
+		;;
+	    
+	    # default: not supported, abort
+	    *)
+		echo "Command '$CMD' is not implemented, aborting"
+		git rebase --abort
+		exit -1
+		;;
+	esac
+	echo "Committing $line..."
+	MSG="$COMMIT_TITLE -> $CMD $ARG $ARG2
+
+$COMMIT_MSG"
+	git commit --message "$MSG"
+    done <<< "$CHANGE_LIST"
+    git rebase --continue
+    echo "Done!"
+}
+
+commitMsg $1
+changeList $1
+
+echo "Commit title: '$COMMIT_TITLE'"
+echo "Commit body: '$COMMIT_MSG'"
+echo ""
+echo "Processing split..."
+echo "Changes: "
+echo "'$CHANGE_LIST'"
+
+editCommit $1
+unstage
+replayEvents $1
+
+# abort in case of problem.
+# If everything run fine we should have done `git rebase --continue`
+git rebase --abort
